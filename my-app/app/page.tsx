@@ -1,3 +1,5 @@
+"use client"
+
 import { useState, useEffect, useRef } from "react";
 
 const SYSTEM_PROMPT = `You are ARIA, a sharp, warm lead qualification agent for a digital services business. Your job is to turn website visitors into qualified leads — not answer general questions.

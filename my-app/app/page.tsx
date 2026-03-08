@@ -1,1088 +1,446 @@
-"use client";
+"use client"
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
+
+// ─── Config — swap this per client ───────────────────────────────────────────
+const BRAND = {
+  name: "Al-Qudus Travels",
+  agentName: "Qudus",
+  color: "#065f46", // emerald-800
+  phone: "+234 801 234 5678",
+  email: "hello@alqudus.travel",
+  hours: "Mon – Sat, 8am – 7pm WAT",
+  whatsapp: "2348012345678",
+};
+
+const PACKAGES = [
+  { id: "dubai",    name: "Dubai Getaway",           duration: "5 days / 4 nights", price: 850000,   tag: "Popular",  includes: ["Return flights", "4-star hotel", "Airport transfers", "City tour", "Desert safari"] },
+  { id: "london",   name: "London Explorer",          duration: "7 days / 6 nights", price: 1400000,  tag: "Value",    includes: ["Return flights", "3-star hotel", "Airport transfers", "Oyster card", "Thames cruise"] },
+  { id: "istanbul", name: "Istanbul & Cappadocia",    duration: "6 days / 5 nights", price: 950000,   tag: "New",      includes: ["Return flights", "4-star hotel", "Hot air balloon", "Guided tours", "All transfers"] },
+  { id: "maldives", name: "Maldives Escape",          duration: "5 days / 4 nights", price: 1800000,  tag: "Luxury",   includes: ["Return flights", "Overwater villa", "All meals", "Snorkelling", "Sunset cruise"] },
+  { id: "umrah",    name: "Umrah Package",            duration: "10 days",           price: 750000,   tag: "Spiritual",includes: ["Return flights", "Hotel near Haram", "Ziyarah tours", "Ground transport", "Visa"] },
+  { id: "local",    name: "Nigeria Road Trips",       duration: "3 – 5 days",        price: 120000,   tag: "Local",    includes: ["Transport", "Hotel", "Meals", "Activities", "Tour guide"] },
+];
+
+const FAQS: { q: string; a: string; id: string }[] = [
+  { id: "visa",      q: "Visa & documents",        a: "We handle visa processing for Dubai, UK, Schengen, and more. Visa fees are separate from the package price. Once you book, we send you a full document checklist and guide you step by step." },
+  { id: "payment",   q: "Payment & instalments",   a: "We accept bank transfers and card payments. A 50% deposit secures your booking, with the balance due 2 weeks before departure. Flexible instalment plans are available on select packages — just ask." },
+  { id: "group",     q: "Group bookings",          a: "Yes! We offer group discounts for 5 or more travellers. Corporate retreats and family group packages can be fully customised around your schedule and budget." },
+  { id: "children",  q: "Travelling with children",a: "Children under 2 travel free (no seat). Ages 2–11 get a discounted child fare. Our family packages include child-friendly hotels and age-appropriate activities." },
+  { id: "cancel",    q: "Cancellation policy",     a: "Cancellations 30+ days before departure receive a 70% refund. Within 14 days of departure, bookings are non-refundable. We strongly recommend adding travel insurance to your package." },
+  { id: "custom",    q: "Custom / other destinations", a: "If your destination isn't listed, we'll build a custom itinerary for you. Tell us where you want to go, your travel dates, and budget — and we'll handle the rest." },
+];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+type Sender = "agent" | "user";
+type Step =
+  | "welcome" | "main"
+  | "packages" | "pkg_detail" | "pkg_quote_count" | "pkg_quote_date" | "pkg_quote_done"
+  | "faq_list" | "faq_answer"
+  | "book_name" | "book_contact" | "book_done"
+  | "custom_dest" | "custom_budget" | "custom_done";
 
-type Role = "user" | "agent" | "system";
-type Stage = "chat" | "capture" | "captured";
+interface Chip  { label: string; value: string }
+interface Msg   { id: number; sender: Sender; text: string; chips?: Chip[]; card?: typeof PACKAGES[0] }
+interface State { step: Step; pkg?: typeof PACKAGES[0]; count?: number; name?: string; dest?: string }
 
-interface Message {
-  id: number;
-  role: Role;
-  text: string;
-  options?: string[];
-  time: string;
-}
+let _id = 0;
+const uid = () => ++_id;
+const fmt = (n: number) => `₦${n.toLocaleString()}`;
 
-interface Lead {
-  name: string;
-  email: string;
-  intent: string;
-}
+// ─── Response Engine ──────────────────────────────────────────────────────────
+function reply(val: string, label: string, st: State): { msgs: Omit<Msg,"id">[]; next: Partial<State> } {
+  const v = val.toLowerCase();
 
-// ─── Knowledge base ───────────────────────────────────────────────────────────
+  // Global shortcuts
+  if (v === "menu")   return toMain("Anything else I can help with?");
+  if (v === "book")   return { msgs: [{ sender:"agent", text:"What's your name?" }], next:{ step:"book_name" } };
+  if (v === "faqs")   return toFaqList();
+  if (v === "pkgs")   return toPkgList();
 
-const KB: { match: string[]; reply: string; followUp?: string; captureAfter?: boolean }[] = [
-  {
-    match: ["service", "offer", "what do you", "what can you"],
-    reply: "We build **custom web products** — from marketing sites to full SaaS platforms. Our core stack is Next.js, Supabase, and TypeScript. Here's a quick overview:",
-    followUp: "Which of these best fits what you need?",
-    captureAfter: false,
-  },
-  {
-    match: ["price", "cost", "how much", "budget", "rate", "fee"],
-    reply: "Pricing depends on scope. As a rough guide:\n\n• **Landing page** — from ₦350k\n• **Web app / SaaS** — from ₦900k\n• **Full product build** — custom quote",
-    followUp: "Want me to get Qudus to send you a proper quote? I just need a couple details.",
-    captureAfter: true,
-  },
-  {
-    match: ["time", "long", "timeline", "deadline", "week", "when"],
-    reply: "Most projects ship in **3–8 weeks** depending on complexity. A landing page can be live in under 2 weeks. Full platforms take 6–10 weeks.",
-    followUp: "Do you have a specific launch deadline? I can let the team know.",
-    captureAfter: true,
-  },
-  {
-    match: ["portfolio", "work", "example", "sample", "previous", "past"],
-    reply: "You can view recent projects at **primyst.dev/work** — including Hairxpert (salon booking platform), a white-label ecommerce system, and various client sites.",
-    followUp: "Would you like the team to walk you through a specific project?",
-    captureAfter: false,
-  },
-  {
-    match: ["contact", "reach", "talk", "speak", "call", "email", "whatsapp"],
-    reply: "You can reach Qudus directly at **hello@primyst.dev** or on WhatsApp. Or — I can collect your info and have them get back to you within a few hours.",
-    followUp: "Want me to arrange that callback?",
-    captureAfter: true,
-  },
-  {
-    match: ["tech", "stack", "built with", "framework", "react", "next", "supabase"],
-    reply: "The core stack is **Next.js 15**, **Supabase** (auth + database), **TypeScript**, **TailwindCSS**, and **Paystack** for payments. Deployed on Vercel.",
-    followUp: "Is there a specific integration you're wondering about?",
-    captureAfter: false,
-  },
-  {
-    match: ["yes", "sure", "okay", "ok", "please", "go ahead", "arrange", "quote", "send"],
-    reply: "Great! Let me grab your details so we can follow up properly.",
-    captureAfter: true,
-  },
-  {
-    match: ["no", "not now", "maybe later", "nope"],
-    reply: "No problem at all. Feel free to come back anytime — I'm here 24/7. Is there anything else I can help you with?",
-    captureAfter: false,
-  },
-];
-
-const SUGGESTIONS = [
-  "What services do you offer?",
-  "How much does a project cost?",
-  "How long does it take?",
-  "Can I see past work?",
-];
-
-function now() {
-  return new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
-}
-
-function makeId() {
-  return Date.now() + Math.random();
-}
-
-function getReply(text: string): { reply: string; followUp?: string; captureAfter?: boolean } {
-  const lower = text.toLowerCase();
-  for (const entry of KB) {
-    if (entry.match.some((kw) => lower.includes(kw))) {
-      return { reply: entry.reply, followUp: entry.followUp, captureAfter: entry.captureAfter };
+  switch (st.step) {
+    case "welcome":
+    case "main": {
+      if (v === "pkgs")   return toPkgList();
+      if (v === "quote")  return toPkgList("Sure! Which destination are you considering?");
+      if (v === "book")   return { msgs:[{ sender:"agent", text:"What's your name?" }], next:{ step:"book_name" } };
+      if (v === "faqs")   return toFaqList();
+      if (v === "hours")  return { msgs:[agent(`We're available **${BRAND.hours}**. You can also reach us anytime via WhatsApp.`, mainChips())], next:{ step:"main" } };
+      if (v === "contact")return { msgs:[agent(`📞 **${BRAND.phone}**\n✉️ **${BRAND.email}**\n🕐 ${BRAND.hours}`, mainChips())], next:{ step:"main" } };
+      return toMain("I didn't catch that — here's what I can help with:");
     }
+
+    case "packages": {
+      const pkg = PACKAGES.find(p => p.id === v);
+      if (pkg) return {
+        msgs:[
+          { sender:"agent", text:"", card: pkg },
+          agent(`Interested in **${pkg.name}**?`, [
+            { label:"Get a quote",      value:`quote_${pkg.id}` },
+            { label:"Book a call",      value:"book" },
+            { label:"← All packages",  value:"pkgs" },
+          ]),
+        ],
+        next:{ step:"pkg_detail", pkg },
+      };
+      return toPkgList();
+    }
+
+    case "pkg_detail": {
+      if (v.startsWith("quote_")) {
+        const pkg = PACKAGES.find(p => `quote_${p.id}` === v)!;
+        return {
+          msgs:[agent(`How many people are travelling on the **${pkg.name}**?`, countChips())],
+          next:{ step:"pkg_quote_count", pkg },
+        };
+      }
+      if (v === "pkgs") return toPkgList();
+      if (v === "book") return { msgs:[agent("What's your name?")], next:{ step:"book_name" } };
+      return toMain();
+    }
+
+    case "pkg_quote_count": {
+      const n = parseInt(v) || 2;
+      return {
+        msgs:[agent(`Got it — **${n === 5 ? "5+" : n}** traveller${n !== 1 ? "s" : ""}. When are you planning to travel?`, dateChips())],
+        next:{ step:"pkg_quote_date", count: n },
+      };
+    }
+
+    case "pkg_quote_date": {
+      const pkg  = st.pkg!;
+      const n    = st.count || 1;
+      const disc = n >= 5 ? 0.10 : n >= 3 ? 0.05 : 0;
+      const total = pkg.price * n * (1 - disc);
+      const note  = disc ? ` _(includes ${disc * 100}% group discount)_` : "";
+      return {
+        msgs:[agent(
+          `Here's your estimate:\n\n✈️ **${pkg.name}**\n👥 ${n} traveller${n!==1?"s":""} · ${label}\n💰 **${fmt(total)}**${note}\n\n_Prices are subject to flight availability. Visa fees are not included._`,
+          [
+            { label:"Book a consultation", value:"book" },
+            { label:"View other packages", value:"pkgs" },
+            { label:"Ask a question",      value:"faqs" },
+          ]
+        )],
+        next:{ step:"pkg_quote_done" },
+      };
+    }
+
+    case "pkg_quote_done":
+    case "faq_answer":
+    case "book_done":
+    case "custom_done": {
+      if (v === "pkgs") return toPkgList();
+      if (v === "faqs") return toFaqList();
+      if (v === "book") return { msgs:[agent("What's your name?")], next:{ step:"book_name" } };
+      return toMain();
+    }
+
+    case "faq_list": {
+      const faq = FAQS.find(f => f.id === v);
+      if (faq) return {
+        msgs:[
+          agent(faq.a),
+          agent("Was that helpful?", [
+            { label:"Another question",    value:"faqs" },
+            { label:"View packages",       value:"pkgs" },
+            { label:"Book a consultation", value:"book" },
+          ]),
+        ],
+        next:{ step:"faq_answer" },
+      };
+      return toFaqList();
+    }
+
+    case "book_name": return {
+      msgs:[agent(`Nice to meet you, **${label}**! What's the best number or email to reach you?`)],
+      next:{ step:"book_contact", name: label },
+    };
+
+    case "book_contact": return {
+      msgs:[agent(
+        `✅ Got it, **${st.name}**! A travel consultant will reach out to you on **${label}** within 2 business hours.\n\nOr contact us directly:\n📞 **${BRAND.phone}**\n✉️ **${BRAND.email}**`,
+        [
+          { label:"View packages", value:"pkgs" },
+          { label:"Ask a question", value:"faqs" },
+          { label:"Back to menu",   value:"menu" },
+        ]
+      )],
+      next:{ step:"book_done" },
+    };
+
+    case "custom_dest": return {
+      msgs:[agent(`${label} sounds amazing! What's your rough budget per person?`, [
+        { label:"Under ₦500k",      value:"u500"  },
+        { label:"₦500k – ₦1M",     value:"m1"    },
+        { label:"₦1M – ₦2M",       value:"m2"    },
+        { label:"Above ₦2M",        value:"m3"    },
+      ])],
+      next:{ step:"custom_budget", dest: label },
+    };
+
+    case "custom_budget": {
+      const budgets: Record<string,string> = { u500:"under ₦500,000", m1:"₦500k – ₦1M", m2:"₦1M – ₦2M", m3:"above ₦2M" };
+      return {
+        msgs:[agent(
+          `A custom trip to **${st.dest}** at **${budgets[v] || label}** per person is very doable. Our team will put together a full itinerary.\n\nShall I get someone to call you?`,
+          [
+            { label:"Yes, book a call",    value:"book" },
+            { label:"I'll reach out later", value:"self" },
+          ]
+        )],
+        next:{ step:"custom_done" },
+      };
+    }
+
+    default: return toMain();
   }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const agent = (text: string, chips?: Chip[]): Omit<Msg,"id"> => ({ sender:"agent", text, chips });
+
+const mainChips = (): Chip[] => [
+  { label:"✈️ Packages",        value:"pkgs"    },
+  { label:"💰 Get a quote",     value:"quote"   },
+  { label:"📞 Book a call",     value:"book"    },
+  { label:"❓ FAQs",            value:"faqs"    },
+  { label:"🕐 Opening hours",   value:"hours"   },
+  { label:"📍 Contact us",      value:"contact" },
+];
+
+const countChips = (): Chip[] => [
+  { label:"1 person",       value:"1" },
+  { label:"2 people",       value:"2" },
+  { label:"3 – 4 people",   value:"3" },
+  { label:"5+ (group)",     value:"5" },
+];
+
+const dateChips = (): Chip[] => [
+  { label:"Within a month",   value:"within a month"   },
+  { label:"In 2 – 3 months",  value:"in 2–3 months"    },
+  { label:"In 4 – 6 months",  value:"in 4–6 months"    },
+  { label:"Just exploring",   value:"flexible / exploring" },
+];
+
+function toMain(text = "How can I help you today?"): ReturnType<typeof reply> {
+  return { msgs:[agent(text, mainChips())], next:{ step:"main" } };
+}
+
+function toPkgList(text = "Here are our current packages:"): ReturnType<typeof reply> {
   return {
-    reply: "That's a great question — I want to make sure I give you the right answer. Let me loop in the team for this one.",
-    followUp: "Can I grab your name and email so they can reach out?",
-    captureAfter: true,
+    msgs:[agent(text, PACKAGES.map(p => ({ label:`${p.name}  ·  ${fmt(p.price)}`, value: p.id })))],
+    next:{ step:"packages" },
   };
 }
 
-// ─── Render bold markdown inline ──────────────────────────────────────────────
+function toFaqList(): ReturnType<typeof reply> {
+  return {
+    msgs:[agent("What would you like to know?", FAQS.map(f => ({ label: f.q, value: f.id })))],
+    next:{ step:"faq_list" },
+  };
+}
 
-function RichText({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+// ─── Markdown renderer ────────────────────────────────────────────────────────
+function MD({ text }: { text: string }) {
   return (
-    <>
-      {parts.map((part, i) =>
-        part.startsWith("**") ? (
-          <strong key={i}>{part.slice(2, -2)}</strong>
-        ) : (
-          <span key={i}>{part}</span>
-        )
-      )}
-    </>
+    <span className="block space-y-0.5">
+      {text.split("\n").map((line, i) => (
+        <span key={i} className="block">
+          {line.split(/(\*\*[^*]+\*\*)/g).map((chunk, j) =>
+            chunk.startsWith("**") && chunk.endsWith("**")
+              ? <strong key={j} className="font-semibold">{chunk.slice(2,-2)}</strong>
+              : <span key={j}>{chunk}</span>
+          )}
+        </span>
+      ))}
+    </span>
   );
 }
 
-// ─── Orb ──────────────────────────────────────────────────────────────────────
-
-function Orb({ active }: { active: boolean }) {
+// ─── Package Card ─────────────────────────────────────────────────────────────
+function PkgCard({ pkg }: { pkg: typeof PACKAGES[0] }) {
   return (
-    <div className="orb-wrap">
-      <div className={`orb ${active ? "orb--active" : ""}`}>
-        <div className="orb-core" />
-        {[1, 2, 3].map((n) => (
-          <div key={n} className={`orb-ring orb-ring--${n}`} />
-        ))}
+    <div className="rounded-xl overflow-hidden border border-stone-200 bg-white shadow-sm text-xs w-full">
+      <div className="px-3.5 py-2.5 flex items-center justify-between" style={{ background: BRAND.color }}>
+        <span className="text-white font-semibold text-[13px]">{pkg.name}</span>
+        <span className="text-[10px] bg-white/20 text-white px-2 py-0.5 rounded-full">{pkg.tag}</span>
+      </div>
+      <div className="px-3.5 py-2.5">
+        <div className="flex items-baseline justify-between mb-2">
+          <span className="text-base font-bold text-stone-800">{fmt(pkg.price)}</span>
+          <span className="text-stone-400">{pkg.duration}</span>
+        </div>
+        <ul className="space-y-0.5">
+          {pkg.includes.map(i => (
+            <li key={i} className="flex items-center gap-1.5 text-stone-500">
+              <span style={{ color: BRAND.color }}>✓</span>{i}
+            </li>
+          ))}
+        </ul>
+        <p className="text-stone-300 mt-2">* per person</p>
       </div>
     </div>
   );
 }
 
-// ─── Lead capture card (inline in chat) ───────────────────────────────────────
+// ─── Widget ───────────────────────────────────────────────────────────────────
+export default function SupportWidget() {
+  const [open, setOpen]       = useState(false);
+  const [unread, setUnread]   = useState(1);
+  const [input, setInput]     = useState("");
+  const [state, setState]     = useState<State>({ step: "welcome" });
+  const [msgs, setMsgs]       = useState<Msg[]>([{
+    id: uid(), sender: "agent",
+    text: `Hi there! 👋 Welcome to **${BRAND.name}**. I'm ${BRAND.agentName}, your travel assistant.\n\nHow can I help you today?`,
+    chips: mainChips(),
+  }]);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
-function LeadCard({ onSubmit }: { onSubmit: (lead: Lead) => void }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [intent, setIntent] = useState("");
-  const [err, setErr] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [msgs]);
+  useEffect(() => { if (open) setUnread(0); }, [open]);
 
-  const handleSubmit = async () => {
-    if (!name.trim() || !email.trim()) {
-      setErr("Please fill in your name and email.");
-      return;
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setErr("Please enter a valid email address.");
-      return;
-    }
-    setErr("");
-    setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 800));
-    onSubmit({ name: name.trim(), email: email.trim(), intent: intent.trim() });
-  };
+  function dispatch(val: string, label: string) {
+    const userMsg: Msg = { id: uid(), sender:"user", text: label };
+    const { msgs: newMsgs, next } = reply(val, label, state);
+    const agentMsgs: Msg[] = newMsgs.map(m => ({ ...m, id: uid() } as Msg));
+    setMsgs(prev => [...prev, userMsg, ...agentMsgs]);
+    setState(prev => ({ ...prev, ...next }));
+  }
+
+  function send() {
+    if (!input.trim()) return;
+    const text = input.trim();
+    setInput("");
+    dispatch(text, text);
+  }
+
+  // Only show chips from the very last agent message
+  const lastAgentChips = [...msgs].reverse().find(m => m.sender === "agent" && m.chips?.length)?.chips;
 
   return (
-    <div className="lead-card">
-      <p className="lead-card-title">Quick introduction</p>
-      <div className="lead-fields">
-        <div className="lead-field">
-          <label>Your name</label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Amara Obi"
-            autoComplete="name"
-          />
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&display=swap');
+        .sw { font-family:'DM Sans',sans-serif; }
+        @keyframes swIn  { from{opacity:0;transform:translateY(12px) scale(.97)} to{opacity:1;transform:none} }
+        @keyframes msgIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:none} }
+        .sw-in  { animation:swIn  .22s cubic-bezier(.2,.8,.4,1) forwards }
+        .msg-in { animation:msgIn .18s ease forwards }
+        .sw-scroll::-webkit-scrollbar{width:3px}
+        .sw-scroll::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:2px}
+      `}</style>
+
+      {/* ── Backdrop hint so reviewers can see the widget in context ── */}
+      <div className="sw min-h-screen bg-gradient-to-br from-slate-100 to-sky-50 flex items-center justify-center relative">
+        <div className="text-center select-none opacity-20 pointer-events-none">
+          <p className="text-6xl mb-4">✈️</p>
+          <p className="text-stone-400 text-sm tracking-widest uppercase">Business website</p>
         </div>
-        <div className="lead-field">
-          <label>Email address</label>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            type="email"
-            autoComplete="email"
-          />
-        </div>
-        <div className="lead-field">
-          <label>What are you building? <span className="optional">(optional)</span></label>
-          <input
-            value={intent}
-            onChange={(e) => setIntent(e.target.value)}
-            placeholder="e.g. ecommerce site, SaaS product..."
-          />
-        </div>
-        {err && <p className="lead-err">{err}</p>}
-        <button className="lead-submit" onClick={handleSubmit} disabled={submitting}>
-          {submitting ? "Sending…" : "Send to team →"}
+
+        {/* ── Widget panel ── */}
+        {open && (
+          <div className="sw-in fixed bottom-24 right-5 w-[360px] max-h-[580px] flex flex-col rounded-2xl shadow-2xl border border-slate-200 bg-white overflow-hidden z-50">
+
+            {/* Header */}
+            <div className="flex items-center gap-3 px-4 py-3.5 shrink-0" style={{ background: BRAND.color }}>
+              <div className="relative shrink-0">
+                <div className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center text-white font-bold text-sm">
+                  {BRAND.agentName[0]}
+                </div>
+                <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-400 border-[2px] border-white" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-[13px] font-semibold leading-tight">{BRAND.agentName} · Support</p>
+                <p className="text-white/60 text-[11px]">{BRAND.name}</p>
+              </div>
+              <button onClick={() => setOpen(false)} className="text-white/60 hover:text-white transition-colors text-lg leading-none shrink-0 ml-1">✕</button>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto sw-scroll px-4 py-4 space-y-2.5 bg-slate-50">
+              {msgs.map(m => (
+                <div key={m.id} className={`msg-in flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
+                  {m.card ? (
+                    <div className="w-full"><PkgCard pkg={m.card} /></div>
+                  ) : (
+                    <div className={`max-w-[85%] text-[13px] leading-relaxed rounded-2xl px-3.5 py-2.5 ${
+                      m.sender === "user"
+                        ? "text-white rounded-br-sm font-medium"
+                        : "bg-white text-stone-700 border border-stone-200 rounded-bl-sm shadow-sm"
+                    }`} style={m.sender === "user" ? { background: BRAND.color } : {}}>
+                      <MD text={m.text} />
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div ref={bottomRef} />
+            </div>
+
+            {/* Chips */}
+            {lastAgentChips && lastAgentChips.length > 0 && (
+              <div className="px-3 py-2.5 border-t border-slate-100 bg-white flex flex-wrap gap-1.5 shrink-0">
+                {lastAgentChips.map(c => (
+                  <button
+                    key={c.value}
+                    onClick={() => dispatch(c.value, c.label)}
+                    className="text-[11.5px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-300 text-slate-600 hover:text-sky-700 transition-colors font-medium"
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Input */}
+            <div className="flex items-center gap-2 px-3 py-3 border-t border-slate-100 bg-white shrink-0">
+              <input
+                className="flex-1 bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-800 placeholder-slate-400 outline-none focus:border-sky-400 transition-colors"
+                placeholder="Type a message…"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && send()}
+              />
+              <button
+                onClick={send}
+                disabled={!input.trim()}
+                className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-colors disabled:bg-slate-200"
+                style={{ background: input.trim() ? BRAND.color : undefined }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            </div>
+
+            <p className="text-center text-[10px] text-slate-300 py-1.5 bg-white shrink-0">
+              Powered by <span className="text-slate-400 font-medium">Primyst</span>
+            </p>
+          </div>
+        )}
+
+        {/* ── FAB ── */}
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="fixed bottom-5 right-5 z-50 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-white text-xl transition-all hover:scale-105 active:scale-95"
+          style={{ background: BRAND.color }}
+        >
+          {open ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M18 6L6 18M6 6l12 12" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            </svg>
+          ) : (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          )}
+          {!open && unread > 0 && (
+            <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+              {unread}
+            </span>
+          )}
         </button>
       </div>
-    </div>
-  );
-}
-
-// ─── Message Bubble ───────────────────────────────────────────────────────────
-
-function Bubble({
-  msg,
-  onOption,
-  onCapture,
-  stage,
-}: {
-  msg: Message;
-  onOption: (o: string) => void;
-  onCapture: (l: Lead) => void;
-  stage: Stage;
-}) {
-  const isUser = msg.role === "user";
-  const isSystem = msg.role === "system";
-
-  if (isSystem) {
-    return (
-      <div className="sys-msg">
-        <span>{msg.text}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className={`brow ${isUser ? "brow--user" : ""}`}>
-      {!isUser && (
-        <div className="bavatar">
-          <svg width="14" height="14" viewBox="0 0 22 22" fill="none">
-            <rect x="1" y="1" width="20" height="20" rx="5" stroke="var(--gold)" strokeWidth="1.6" />
-            <path d="M6 11h10M11 6v10" stroke="var(--gold)" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        </div>
-      )}
-      <div className={`bubble ${isUser ? "bubble--user" : "bubble--agent"}`}>
-        <p className="bubble-text">
-          {msg.text.split("\n").map((line, i) => (
-            <span key={i}>
-              <RichText text={line} />
-              {i < msg.text.split("\n").length - 1 && <br />}
-            </span>
-          ))}
-        </p>
-        {msg.options && stage === "chat" && (
-          <div className="bubble-options">
-            {msg.options.map((o) => (
-              <button key={o} className="opt-btn" onClick={() => onOption(o)}>
-                {o}
-              </button>
-            ))}
-          </div>
-        )}
-        {msg.role === "agent" && stage === "capture" && msg === undefined && (
-          <LeadCard onSubmit={onCapture} />
-        )}
-        <span className="bubble-time">{msg.time}</span>
-      </div>
-    </div>
-  );
-}
-
-// ─── Typing indicator ─────────────────────────────────────────────────────────
-
-function Typing() {
-  return (
-    <div className="brow">
-      <div className="bavatar">
-        <svg width="14" height="14" viewBox="0 0 22 22" fill="none">
-          <rect x="1" y="1" width="20" height="20" rx="5" stroke="var(--gold)" strokeWidth="1.6" />
-          <path d="M6 11h10M11 6v10" stroke="var(--gold)" strokeWidth="1.6" strokeLinecap="round" />
-        </svg>
-      </div>
-      <div className="bubble bubble--agent bubble--typing">
-        <span /><span /><span />
-      </div>
-    </div>
-  );
-}
-
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
-
-function Sidebar({ lead, msgCount, onClose }: { lead: Lead | null; msgCount: number; onClose?: () => void }) {
-  return (
-    <div className="sb-inner">
-      <div className="sb-top">
-        <div className="sb-logo">
-          <svg width="20" height="20" viewBox="0 0 22 22" fill="none">
-            <rect x="1" y="1" width="20" height="20" rx="5" stroke="var(--gold)" strokeWidth="1.5" />
-            <path d="M6 11h10M11 6v10" stroke="var(--gold)" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-          <span>Primyst</span>
-        </div>
-        {onClose && (
-          <button className="sb-close" onClick={onClose} aria-label="Close">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-
-      <div className="sb-div" />
-
-      <div className="sb-agent">
-        <Orb active={false} />
-        <div>
-          <p className="sb-agent-name">Primyst AI</p>
-          <p className="sb-agent-role">Support Agent</p>
-        </div>
-      </div>
-
-      <div className="sb-div" />
-
-      <div className="sb-section-label">Session</div>
-      <ul className="sb-meta">
-        {[
-          ["Status", "Active"],
-          ["Messages", String(msgCount)],
-          ["Response time", "~2 sec"],
-          ["Queue position", "Instant"],
-        ].map(([k, v]) => (
-          <li key={k}>
-            <span className="sb-meta-key">{k}</span>
-            <span className="sb-meta-val">{v}</span>
-          </li>
-        ))}
-      </ul>
-
-      <div className="sb-div" />
-
-      <div className="sb-section-label">Visitor</div>
-      {lead ? (
-        <div className="sb-lead-card">
-          <div className="sb-lead-row">
-            <span className="sb-lead-label">Name</span>
-            <span className="sb-lead-val">{lead.name}</span>
-          </div>
-          <div className="sb-lead-row">
-            <span className="sb-lead-label">Email</span>
-            <span className="sb-lead-val sb-lead-email">{lead.email}</span>
-          </div>
-          {lead.intent && (
-            <div className="sb-lead-row">
-              <span className="sb-lead-label">Interest</span>
-              <span className="sb-lead-val">{lead.intent}</span>
-            </div>
-          )}
-          <div className="sb-lead-captured">
-            <span className="captured-dot" />
-            Lead captured
-          </div>
-        </div>
-      ) : (
-        <p className="sb-no-lead">Not yet captured — Primyst will ask naturally.</p>
-      )}
-
-      <div className="sb-div" />
-
-      <div className="sb-capabilities">
-        <div className="sb-section-label">What Primyst does</div>
-        {[
-          ["⚡", "Answers questions instantly"],
-          ["🎯", "Captures leads automatically"],
-          ["🔁", "Escalates to humans when needed"],
-          ["📊", "Logs every conversation"],
-        ].map(([icon, label]) => (
-          <div key={label as string} className="sb-cap">
-            <span className="sb-cap-icon">{icon}</span>
-            <span>{label}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="sb-footer">
-        <div className="sb-online">
-          <span className="online-dot" />
-          <span>Online · 24/7 availability</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Main Page ────────────────────────────────────────────────────────────────
-
-export default function SupportPage() {
-  const WELCOME: Message = {
-    id: 1,
-    role: "agent",
-    text: "Hey there 👋 I'm the Primyst AI agent. I can answer questions about our services, help you figure out what you need, and connect you with the team.",
-    options: SUGGESTIONS,
-    time: now(),
-  };
-
-  const [messages, setMessages] = useState<Message[]>([WELCOME]);
-  const [input, setInput] = useState("");
-  const [thinking, setThinking] = useState(false);
-  const [stage, setStage] = useState<Stage>("chat");
-  const [lead, setLead] = useState<Lead | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [captureCardId, setCaptureCardId] = useState<number | null>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, thinking, stage]);
-
-  useEffect(() => {
-    const onResize = () => { if (window.innerWidth >= 768) setDrawerOpen(false); };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  const agentReply = useCallback(
-    async (userText: string) => {
-      setThinking(true);
-      await new Promise((r) => setTimeout(r, 1100 + Math.random() * 700));
-
-      const { reply, followUp, captureAfter } = getReply(userText);
-
-      const mainMsg: Message = { id: makeId(), role: "agent", text: reply, time: now() };
-      setMessages((m) => [...m, mainMsg]);
-
-      if (followUp) {
-        await new Promise((r) => setTimeout(r, 600));
-        const followId = makeId();
-        const fMsg: Message = { id: followId, role: "agent", text: followUp, time: now() };
-        setMessages((m) => [...m, fMsg]);
-
-        if (captureAfter && stage === "chat") {
-          await new Promise((r) => setTimeout(r, 400));
-          setStage("capture");
-          setCaptureCardId(followId);
-        }
-      }
-
-      setThinking(false);
-    },
-    [stage]
-  );
-
-  const send = useCallback(
-    (text: string) => {
-      if (!text.trim() || thinking || stage === "captured") return;
-      const userMsg: Message = { id: makeId(), role: "user", text: text.trim(), time: now() };
-      setMessages((m) => [...m, userMsg]);
-      setInput("");
-      agentReply(text.trim());
-    },
-    [thinking, stage, agentReply]
-  );
-
-  const handleCapture = async (data: Lead) => {
-    setLead(data);
-    setStage("captured");
-
-    const confirm: Message = {
-      id: makeId(),
-      role: "agent",
-      text: `Thanks, ${data.name.split(" ")[0]}! 🎉 Your details have been sent to the Primyst team. Expect a response within a few hours.`,
-      time: now(),
-    };
-    const follow: Message = {
-      id: makeId(),
-      role: "agent",
-      text: "In the meantime, feel free to keep asking questions — I'm still here.",
-      time: now(),
-    };
-
-    await new Promise((r) => setTimeout(r, 300));
-    setMessages((m) => [...m, confirm]);
-    await new Promise((r) => setTimeout(r, 500));
-    setMessages((m) => [...m, follow]);
-    setStage("chat");
-  };
-
-  const msgCount = messages.filter((m) => m.role !== "system").length;
-
-  return (
-    <>
-      <style>{CSS}</style>
-
-      {drawerOpen && (
-        <div className="drawer-overlay" onClick={() => setDrawerOpen(false)} />
-      )}
-
-      <div className="page">
-        {/* Desktop sidebar */}
-        <aside className="sb sb--desk">
-          <Sidebar lead={lead} msgCount={msgCount} />
-        </aside>
-
-        {/* Mobile drawer */}
-        <aside className={`sb sb--drawer ${drawerOpen ? "sb--open" : ""}`}>
-          <Sidebar lead={lead} msgCount={msgCount} onClose={() => setDrawerOpen(false)} />
-        </aside>
-
-        <main className="chat">
-          {/* Header */}
-          <header className="chat-header">
-            <button className="menu-btn" onClick={() => setDrawerOpen(true)} aria-label="Menu">
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <path d="M2 4.5h14M2 9h14M2 13.5h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </button>
-
-            <Orb active={thinking} />
-
-            <div className="hd-text">
-              <h1 className="hd-title">Primyst AI</h1>
-              <p className="hd-sub">Support Agent · Powered by Primyst</p>
-            </div>
-
-            <div className="hd-status">
-              <span className="online-dot" />
-              <span className="hd-status-label">{thinking ? "Typing…" : "Online"}</span>
-            </div>
-          </header>
-
-          {/* Messages */}
-          <div className="messages">
-            {messages.map((m) => (
-              <div key={m.id}>
-                <Bubble
-                  msg={m}
-                  onOption={(o) => send(o)}
-                  onCapture={handleCapture}
-                  stage={stage}
-                />
-                {/* Render lead capture card after the capture-trigger message */}
-                {stage === "capture" && captureCardId === m.id && (
-                  <div className="brow lead-card-wrap">
-                    <div className="bavatar" style={{ visibility: "hidden" }} />
-                    <LeadCard onSubmit={handleCapture} />
-                  </div>
-                )}
-              </div>
-            ))}
-            {thinking && <Typing />}
-            <div ref={endRef} />
-          </div>
-
-          {/* Suggestions (shown at start only) */}
-          {messages.length <= 2 && stage === "chat" && (
-            <div className="suggestions">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} className="sug-btn" onClick={() => send(s)}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Input */}
-          <div className="input-row">
-            <input
-              ref={inputRef}
-              className="input-field"
-              placeholder={
-                stage === "capture"
-                  ? "Fill in your details above…"
-                  : "Ask anything about Primyst…"
-              }
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && stage !== "capture" && send(input)}
-              disabled={stage === "capture"}
-              autoComplete="off"
-            />
-            <button
-              className="send-btn"
-              onClick={() => send(input)}
-              disabled={thinking || stage === "capture"}
-              aria-label="Send"
-            >
-              <svg width="15" height="15" viewBox="0 0 18 18" fill="none">
-                <path d="M16 9L2 2l3 7-3 7 14-7z" fill="currentColor" />
-              </svg>
-            </button>
-          </div>
-
-          <div className="chat-brand">Primyst AI · Available 24/7</div>
-        </main>
-      </div>
     </>
   );
 }
-
-// ─── CSS ──────────────────────────────────────────────────────────────────────
-
-const CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=DM+Mono:wght@300;400&display=swap');
-
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  :root {
-    --bg:       #0b0b0d;
-    --surf:     #111114;
-    --surf2:    #18181c;
-    --surf3:    #1e1e23;
-    --border:   rgba(255,255,255,0.07);
-    --gold:     #c9a96e;
-    --gold-d:   rgba(201,169,110,0.13);
-    --gold-s:   rgba(201,169,110,0.28);
-    --text:     #e8e4dc;
-    --text-d:   rgba(232,228,220,0.45);
-    --green:    #4ade80;
-    --sb-w:     268px;
-    --hh:       68px;
-    --serif:    'Cormorant Garamond', Georgia, serif;
-    --mono:     'DM Mono', monospace;
-    --ease:     cubic-bezier(0.4,0,0.2,1);
-  }
-
-  html,body,#__next { height: 100%; }
-
-  .page {
-    display: flex;
-    height: 100dvh;
-    background: var(--bg);
-    font-family: var(--mono);
-    color: var(--text);
-    overflow: hidden;
-  }
-
-  /* ── Sidebar ─────────────────────────── */
-
-  .sb {
-    background: var(--surf);
-    border-right: 1px solid var(--border);
-    overflow: hidden;
-  }
-
-  .sb-inner {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    padding: 26px 22px;
-    overflow-y: auto;
-    scrollbar-width: none;
-  }
-  .sb-inner::-webkit-scrollbar { display: none; }
-
-  .sb--desk { width: var(--sb-w); flex-shrink: 0; }
-
-  .sb--drawer {
-    position: fixed;
-    inset-block: 0;
-    left: 0;
-    width: min(var(--sb-w), 86vw);
-    height: 100dvh;
-    z-index: 200;
-    transform: translateX(-110%);
-    transition: transform 0.3s var(--ease);
-    box-shadow: 6px 0 40px rgba(0,0,0,0.55);
-  }
-  .sb--drawer.sb--open { transform: translateX(0); }
-
-  @media (min-width: 768px) {
-    .sb--desk   { display: block; }
-    .sb--drawer { display: none; }
-    .menu-btn   { display: none !important; }
-  }
-  @media (max-width: 767px) {
-    .sb--desk   { display: none; }
-    .sb--drawer { display: block; }
-  }
-
-  .drawer-overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.6);
-    backdrop-filter: blur(3px);
-    z-index: 199;
-  }
-
-  .sb-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 22px;
-  }
-
-  .sb-logo {
-    display: flex; align-items: center; gap: 9px;
-    font-family: var(--serif); font-size: 19px;
-    font-weight: 600; letter-spacing: 0.05em;
-    color: var(--gold);
-  }
-
-  .sb-close {
-    background: none; border: none; color: var(--text-d);
-    cursor: pointer; padding: 6px; border-radius: 6px;
-    display: flex; min-width: 30px; min-height: 30px;
-    align-items: center; justify-content: center;
-    transition: color 0.2s;
-  }
-  .sb-close:hover { color: var(--text); }
-
-  .sb-div { height: 1px; background: var(--border); margin: 18px 0; flex-shrink: 0; }
-
-  .sb-agent { display: flex; align-items: center; gap: 12px; }
-
-  .sb-agent-name {
-    font-family: var(--serif); font-size: 15px;
-    font-weight: 500; color: var(--text); line-height: 1.2;
-  }
-  .sb-agent-role {
-    font-size: 10px; color: var(--gold);
-    letter-spacing: 0.1em; text-transform: uppercase; margin-top: 2px;
-  }
-
-  .sb-section-label {
-    font-size: 9px; color: var(--text-d);
-    letter-spacing: 0.14em; text-transform: uppercase;
-    margin-bottom: 12px;
-  }
-
-  .sb-meta { list-style: none; display: flex; flex-direction: column; gap: 11px; }
-  .sb-meta li { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-  .sb-meta-key { font-size: 10px; color: var(--text-d); letter-spacing: 0.07em; }
-  .sb-meta-val { font-size: 11px; color: var(--text); }
-
-  .sb-lead-card {
-    background: var(--surf2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px;
-    display: flex; flex-direction: column; gap: 8px;
-  }
-  .sb-lead-row { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
-  .sb-lead-label { font-size: 9px; color: var(--text-d); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 1px; }
-  .sb-lead-val { font-size: 11px; color: var(--text); text-align: right; }
-  .sb-lead-email { color: var(--gold); }
-
-  .sb-lead-captured {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 9px; color: var(--green);
-    letter-spacing: 0.08em; text-transform: uppercase;
-    padding-top: 6px; border-top: 1px solid var(--border);
-  }
-
-  .captured-dot {
-    width: 5px; height: 5px; border-radius: 50%;
-    background: var(--green); flex-shrink: 0;
-  }
-
-  .sb-no-lead {
-    font-size: 11px; color: var(--text-d);
-    line-height: 1.5; font-style: italic;
-  }
-
-  .sb-capabilities { display: flex; flex-direction: column; gap: 10px; }
-  .sb-cap { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--text-d); }
-  .sb-cap-icon { font-size: 13px; }
-
-  .sb-footer { margin-top: auto; padding-top: 18px; }
-  .sb-online { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--text-d); letter-spacing: 0.07em; }
-
-  .online-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green); box-shadow: 0 0 6px var(--green);
-    flex-shrink: 0;
-    animation: blink 2.2s ease-in-out infinite;
-  }
-
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-  /* ── Orb ─────────────────────────────── */
-
-  .orb-wrap { position: relative; width: 42px; height: 42px; flex-shrink: 0; }
-
-  .orb { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-
-  .orb-core {
-    width: 15px; height: 15px; border-radius: 50%;
-    background: radial-gradient(circle at 38% 32%, #edd9a3, var(--gold));
-    box-shadow: 0 0 10px rgba(201,169,110,0.55);
-    transition: all 0.35s;
-  }
-
-  .orb--active .orb-core {
-    animation: breathe 1.1s ease-in-out infinite;
-    box-shadow: 0 0 22px rgba(201,169,110,0.85);
-  }
-
-  @keyframes breathe { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
-
-  .orb-ring {
-    position: absolute; inset: 0; border-radius: 50%;
-    border: 1px solid rgba(201,169,110,0.18);
-    animation: ripple 3s ease-out infinite;
-  }
-  .orb-ring--2 { animation-delay: 1s; }
-  .orb-ring--3 { animation-delay: 2s; }
-
-  @keyframes ripple { 0%{transform:scale(0.35);opacity:0.7} 100%{transform:scale(1);opacity:0} }
-
-  /* ── Chat ────────────────────────────── */
-
-  .chat {
-    flex: 1; min-width: 0;
-    display: flex; flex-direction: column;
-    height: 100dvh; overflow: hidden;
-  }
-
-  .chat-header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 0 18px; height: var(--hh); min-height: var(--hh);
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0; background: var(--surf);
-  }
-
-  @media (min-width: 640px) { .chat-header { padding: 0 28px; gap: 14px; } }
-
-  .menu-btn {
-    background: none; border: none; color: var(--text-d);
-    cursor: pointer; padding: 8px; border-radius: 8px;
-    display: flex; flex-shrink: 0; transition: color 0.2s;
-    min-width: 40px; min-height: 40px; align-items: center; justify-content: center;
-  }
-  .menu-btn:hover { color: var(--text); }
-
-  .hd-text { flex: 1; min-width: 0; }
-
-  .hd-title {
-    font-family: var(--serif); font-size: 21px;
-    font-weight: 600; letter-spacing: 0.08em;
-    color: var(--text); line-height: 1;
-  }
-
-  .hd-sub {
-    font-size: 9px; color: var(--text-d);
-    letter-spacing: 0.1em; text-transform: uppercase;
-    margin-top: 3px; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
-  }
-
-  @media (max-width: 400px) { .hd-sub { display: none; } .hd-title { font-size: 17px; } }
-
-  .hd-status {
-    display: flex; align-items: center; gap: 7px;
-    font-size: 10px; color: var(--text-d);
-    letter-spacing: 0.07em; flex-shrink: 0;
-  }
-  .hd-status-label { white-space: nowrap; }
-  @media (max-width: 380px) { .hd-status-label { display: none; } }
-
-  /* ── Messages ────────────────────────── */
-
-  .messages {
-    flex: 1; overflow-y: auto;
-    padding: 20px 16px;
-    display: flex; flex-direction: column; gap: 14px;
-    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  @media (min-width: 640px) { .messages { padding: 24px 28px; gap: 18px; } }
-
-  .brow {
-    display: flex; align-items: flex-end; gap: 8px;
-    animation: up 0.25s ease both;
-  }
-  .brow--user { flex-direction: row-reverse; }
-
-  @keyframes up { from{opacity:0;transform:translateY(7px)} to{opacity:1;transform:translateY(0)} }
-
-  .bavatar {
-    width: 28px; height: 28px; flex-shrink: 0;
-    border-radius: 8px;
-    background: var(--gold-d);
-    border: 1px solid rgba(201,169,110,0.35);
-    display: flex; align-items: center; justify-content: center;
-  }
-
-  .bubble {
-    max-width: min(480px, 76vw);
-    padding: 11px 14px;
-    border-radius: 14px;
-    font-size: 13px; line-height: 1.7;
-    word-break: break-word;
-  }
-
-  @media (min-width: 640px) { .bubble { padding: 13px 17px; } }
-
-  .bubble--agent {
-    background: var(--surf2);
-    border: 1px solid var(--border);
-    border-bottom-left-radius: 3px;
-    color: var(--text);
-  }
-
-  .bubble--user {
-    background: var(--gold-d);
-    border: 1px solid var(--gold-s);
-    border-bottom-right-radius: 3px;
-    color: var(--text);
-  }
-
-  .bubble-text { white-space: pre-line; }
-
-  .bubble-options {
-    display: flex; flex-wrap: wrap; gap: 6px;
-    margin-top: 12px;
-  }
-
-  .opt-btn {
-    padding: 5px 11px;
-    background: var(--surf3);
-    border: 1px solid rgba(201,169,110,0.25);
-    border-radius: 20px;
-    color: var(--gold); font-family: var(--mono);
-    font-size: 10px; letter-spacing: 0.04em;
-    cursor: pointer; transition: all 0.18s;
-    white-space: nowrap;
-  }
-  .opt-btn:hover { background: var(--gold-d); border-color: var(--gold); }
-
-  .bubble-time {
-    display: block; font-size: 9px; color: var(--text-d);
-    margin-top: 6px; letter-spacing: 0.06em;
-  }
-
-  /* Typing */
-  .bubble--typing {
-    display: flex !important; align-items: center; gap: 5px;
-    padding: 13px 16px !important;
-  }
-  .bubble--typing span {
-    width: 5px; height: 5px; border-radius: 50%;
-    background: var(--gold); opacity: 0.4;
-    animation: dot 1.2s ease-in-out infinite;
-  }
-  .bubble--typing span:nth-child(2) { animation-delay: 0.2s; }
-  .bubble--typing span:nth-child(3) { animation-delay: 0.4s; }
-
-  @keyframes dot {
-    0%,80%,100%{transform:translateY(0);opacity:0.4}
-    40%{transform:translateY(-5px);opacity:1}
-  }
-
-  /* System message */
-  .sys-msg {
-    text-align: center; font-size: 10px;
-    color: var(--text-d); letter-spacing: 0.06em;
-    padding: 4px 0;
-  }
-
-  /* ── Lead capture card ───────────────── */
-
-  .lead-card-wrap { align-items: flex-start; }
-
-  .lead-card {
-    max-width: min(440px, 76vw);
-    background: var(--surf2);
-    border: 1px solid rgba(201,169,110,0.22);
-    border-radius: 14px;
-    padding: 16px;
-    animation: up 0.3s ease both;
-  }
-
-  .lead-card-title {
-    font-family: var(--serif); font-size: 14px;
-    font-weight: 500; color: var(--gold);
-    margin-bottom: 14px; letter-spacing: 0.03em;
-  }
-
-  .lead-fields { display: flex; flex-direction: column; gap: 10px; }
-
-  .lead-field { display: flex; flex-direction: column; gap: 5px; }
-
-  .lead-field label {
-    font-size: 10px; color: var(--text-d);
-    letter-spacing: 0.08em; text-transform: uppercase;
-  }
-  .optional { font-size: 9px; color: var(--text-d); text-transform: none; letter-spacing: 0; }
-
-  .lead-field input {
-    background: var(--surf3);
-    border: 1px solid var(--border);
-    border-radius: 8px; padding: 9px 12px;
-    font-family: var(--mono); font-size: 12px;
-    color: var(--text); outline: none;
-    transition: border-color 0.2s;
-    -webkit-appearance: none;
-  }
-  .lead-field input::placeholder { color: var(--text-d); }
-  .lead-field input:focus { border-color: rgba(201,169,110,0.4); }
-
-  .lead-err { font-size: 11px; color: #f87171; }
-
-  .lead-submit {
-    margin-top: 4px; width: 100%; padding: 10px;
-    background: var(--gold); border: none;
-    border-radius: 8px; color: #0b0b0d;
-    font-family: var(--mono); font-size: 12px;
-    letter-spacing: 0.05em; cursor: pointer;
-    transition: background 0.2s, transform 0.15s;
-    min-height: 40px;
-  }
-  .lead-submit:hover { background: #d4b47a; }
-  .lead-submit:active { transform: scale(0.97); }
-  .lead-submit:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  /* ── Suggestions ─────────────────────── */
-
-  .suggestions {
-    display: flex; gap: 7px;
-    padding: 0 16px 12px;
-    flex-shrink: 0;
-    overflow-x: auto; scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-    -webkit-mask-image: linear-gradient(to right,transparent 0,black 12px,black calc(100% - 12px),transparent 100%);
-    mask-image: linear-gradient(to right,transparent 0,black 12px,black calc(100% - 12px),transparent 100%);
-  }
-  .suggestions::-webkit-scrollbar { display: none; }
-
-  @media (min-width: 640px) {
-    .suggestions {
-      padding: 0 28px 14px;
-      flex-wrap: wrap; overflow-x: visible;
-      -webkit-mask-image: none; mask-image: none;
-    }
-  }
-
-  .sug-btn {
-    padding: 7px 13px;
-    background: transparent;
-    border: 1px solid var(--border); border-radius: 20px;
-    color: var(--text-d); font-family: var(--mono);
-    font-size: 10px; letter-spacing: 0.05em;
-    cursor: pointer; transition: all 0.18s;
-    white-space: nowrap; flex-shrink: 0; min-height: 34px;
-  }
-  .sug-btn:hover,.sug-btn:active {
-    border-color: var(--gold); color: var(--gold); background: var(--gold-d);
-  }
-
-  /* ── Input ───────────────────────────── */
-
-  .input-row {
-    display: flex; align-items: center; gap: 9px;
-    padding: 12px 16px;
-    border-top: 1px solid var(--border);
-    flex-shrink: 0; background: var(--surf);
-  }
-
-  @media (min-width: 640px) { .input-row { padding: 16px 28px; gap: 10px; } }
-
-  @supports (padding-bottom: env(safe-area-inset-bottom)) {
-    .input-row { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
-  }
-
-  .input-field {
-    flex: 1; min-width: 0;
-    background: var(--surf2); border: 1px solid var(--border);
-    border-radius: 10px; padding: 11px 14px;
-    font-family: var(--mono); font-size: 13px;
-    color: var(--text); outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
-    -webkit-appearance: none;
-  }
-  .input-field::placeholder { color: var(--text-d); }
-  .input-field:focus { border-color: rgba(201,169,110,0.4); box-shadow: 0 0 0 3px rgba(201,169,110,0.06); }
-  .input-field:disabled { opacity: 0.45; cursor: not-allowed; }
-
-  .send-btn {
-    width: 42px; height: 42px; min-width: 42px;
-    border-radius: 10px; background: var(--gold);
-    border: none; color: #0b0b0d; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: background 0.18s, transform 0.12s; flex-shrink: 0;
-  }
-  .send-btn:hover { background: #d4b47a; }
-  .send-btn:active { transform: scale(0.93); }
-  .send-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
-
-  .chat-brand {
-    text-align: center; font-size: 9px;
-    color: var(--text-d); letter-spacing: 0.09em;
-    padding: 6px 0 10px;
-    flex-shrink: 0;
-  }
-
-  @supports (padding-bottom: env(safe-area-inset-bottom)) {
-    .chat-brand { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
-  }
-`;
